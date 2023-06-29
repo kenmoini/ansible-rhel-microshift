@@ -1,0 +1,12 @@
+[microshift]
+{% for k8snode in nodes %}
+{{ k8snode.name }} ansible_host={{ k8snode.networking[0].ips[0] }}
+
+{% endfor %}
+
+[microshift:vars]
+ansible_ssh_user=root
+ansible_ssh_private_key_file={{ template_dest }}/id_rsa
+ansible_ssh_common_args='-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no'
+
+microshift_base_domain={{ node_base_domain }}

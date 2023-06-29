@@ -1,0 +1,151 @@
+---
+# ansible-playbook -i .generated/gen_inventory deploy-microshift.yml
+
+- name: Deploy Microshift to RHEL servers
+  hosts: microshift
+
+  vars:
+    rhel_repos:
+      - rhocp-4.13-for-rhel-9-x86_64-rpms
+      - fast-datapath-for-rhel-9-x86_64-rpms
+
+    rhel_packages:
+      - microshift
+      - cockpit
+
+    pull_secret_path: /mnt/remoteWork/pull-secret.txt
+    pull_secret: "{{ lookup('file', pull_secret_path) }}"
+
+    microshift_state: started
+
+    microshift_config:
+      network:
+        clusterNetworkCIDRs:
+          - 10.42.0.0/16
+        serviceNetwork:
+          - 10.43.0.0/16
+        serviceNodePortRange: 30000-32767
+      apiServer:
+        subjectAltNames:
+          - api.{{ microshift_base_domain }}
+
+  tasks:
+    - name: Enable all repositories for Microshift
+      community.general.rhsm_repository:
+        name: "{{ rhel_repos }}"
+        state: enabled
+
+    - name: Install the required packages
+      ansible.builtin.yum:
+        name: "{{ rhel_packages }}"
+        state: latest
+
+    - name: Enable and start cockpit
+      ansible.builtin.systemd:
+        name: cockpit.socket
+        enabled: true
+        state: started
+
+    - name: Create the crio directory
+      ansible.builtin.file:
+        path: /etc/crio
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Create the Pull Secret
+      ansible.builtin.copy:
+        content: "{{ pull_secret }}"
+        dest: /etc/crio/openshift-pull-secret
+        mode: 0600
+        owner: root
+        group: root
+
+    - name: Template the microshift config
+      ansible.builtin.template:
+        src: templates/microshift-config.yml.j2
+        dest: /etc/microshift/config.yaml
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Enable pod network access via firewalld
+      ansible.posix.firewalld:
+        #source: 192.0.2.0/24
+        source: "{{ item }}"
+        zone: trusted
+        state: enabled
+        permanent: true
+        immediate: true
+      loop: "{{ microshift_config.network.clusterNetworkCIDRs }}"
+
+    - name: Enable local network access via firewalld
+      ansible.posix.firewalld:
+        source: 169.254.169.1
+        zone: trusted
+        state: enabled
+        permanent: true
+        immediate: true
+
+    - name: Enable external access to the API, HTTP, and HTTPS ports
+      ansible.posix.firewalld:
+        port: "{{ item }}"
+        zone: trusted
+        state: enabled
+        permanent: true
+        immediate: true
+      loop:
+        - 6443/tcp
+        - 80/tcp
+        - 443/tcp
+
+    - name: Enable external access to the API, HTTP, and HTTPS ports
+      ansible.posix.firewalld:
+        port: "{{ item }}"
+        zone: public
+        state: enabled
+        permanent: true
+        immediate: true
+      loop:
+        - 6443/tcp
+        - 80/tcp
+        - 443/tcp
+
+    - name: Enable and set the Microshift service state
+      ansible.builtin.systemd:
+        name: microshift
+        enabled: true
+        state: "{{ microshift_state }}"
+
+    - name: Stop the kubepods.slice to drain all the pods
+      when: microshift_state == 'stopped'
+      ansible.builtin.systemd:
+        name: kubepods.slice
+        state: stopped
+
+    - name: Make a .kube folder
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        owner: "{{ ansible_env.USER }}"
+        group: "{{ ansible_env.USER }}"
+        mode: 0755
+
+    - name: Copy over the kubeconfig file
+      ansible.builtin.copy:
+        remote_src: true
+        src: /var/lib/microshift/resources/kubeadmin/kubeconfig
+        dest: "{{ ansible_env.HOME }}/.kube/config"
+        owner: "{{ ansible_env.USER }}"
+        group: "{{ ansible_env.USER }}"
+        mode: 0600
+
+    - name: Copy over the remote kubeconfig file
+      ansible.builtin.copy:
+        remote_src: true
+        src: /var/lib/microshift/resources/kubeadmin/api.{{ microshift_base_domain }}/kubeconfig
+        dest: "{{ ansible_env.HOME }}/.kube/remote-config"
+        owner: "{{ ansible_env.USER }}"
+        group: "{{ ansible_env.USER }}"
+        mode: 0600
